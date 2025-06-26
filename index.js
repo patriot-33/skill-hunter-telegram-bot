@@ -121,10 +121,10 @@ function createPrompt(userMessage, conversationHistory, userId) {
         const recentSuccessfulCases = database.successfulCases.slice(-3);
         learningPrompt = `
 УСПЕШНЫЕ СТРАТЕГИИ (учитесь на этих примерах):
-${recentSuccessfulCases.map(case => `
-- Ключевые фразы: ${case.keyPhrases.join(', ')}
-- Результат: ${case.outcome}
-- Время до успеха: ${case.timeToSuccess} сообщений
+${recentSuccessfulCases.map(successCase => `
+- Ключевые фразы: ${successCase.keyPhrases.join(', ')}
+- Результат: ${successCase.outcome}
+- Время до успеха: ${successCase.timeToSuccess} сообщений
 `).join('\n')}
 `;
     }

@@ -2,14 +2,14 @@ const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 const express = require('express');
 const cron = require('node-cron');
-const fs = require('fs').promises;
-const path = require('path');
+const { MongoClient } = require('mongodb');
 
 // Конфигурция (заполните своими данными)
 const config = {
     telegramToken: process.env.TELEGRAM_BOT_TOKEN, // Получите у @BotFather
     openaiApiKey: process.env.OPENAI_API_KEY,      // Ваш OpenAI API ключ
     adminTelegramId: process.env.ADMIN_TELEGRAM_ID, // Ваш Telegram ID для отчетов
+    mongoUrl: process.env.MONGODB_URL || 'mongodb://localhost:27017/skillhunter', // MongoDB URL
     port: process.env.PORT || 3000
 };
 
@@ -18,8 +18,32 @@ const bot = new TelegramBot(config.telegramToken, { polling: true });
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const app = express();
 
-// База данных в памяти и файловая система
+// MongoDB подключение
+let db;
+let dialogsCollection;
+
+async function connectToMongoDB() {
+    try {
+        const client = new MongoClient(config.mongoUrl);
+        await client.connect();
+        db = client.db('skillhunter');
+        dialogsCollection = db.collection('dialogs');
+        console.log('✅ Подключено к MongoDB');
+        
+        // Создаем индекс для быстрого поиска по userId
+        await dialogsCollection.createIndex({ userId: 1 });
+        
+    } catch (error) {
+        console.error('❌ Ошибка подключения к MongoDB:', error);
+        // Fallback к локальному хранилищу
+        console.log('🔄 Используем локальное хранилище в памяти');
+        db = null;
+    }
+}
+
+// База данных в памяти и MongoDB
 const database = {
+    conversations: new Map(), // Fallback для локального хранения
     dailyStats: {
         totalConversations: 0,
         successfulConversations: 0,
@@ -28,41 +52,61 @@ const database = {
     successfulCases: [] // Для самообучения
 };
 
-// Папка для хранения диалогов
-const DIALOGS_DIR = './dialogs';
-
-// Функция для создания папки диалогов
-async function ensureDialogsDir() {
-    try {
-        await fs.access(DIALOGS_DIR);
-    } catch {
-        await fs.mkdir(DIALOGS_DIR, { recursive: true });
-        console.log('Создана папка для диалогов:', DIALOGS_DIR);
-    }
-}
-
 // Функция для сохранения диалога пользователя
 async function saveUserDialog(userId, conversation) {
     try {
-        const filename = path.join(DIALOGS_DIR, `user_${userId}.json`);
-        await fs.writeFile(filename, JSON.stringify(conversation, null, 2), 'utf8');
-        console.log(`Диалог пользователя ${userId} сохранен`);
+        if (db && dialogsCollection) {
+            // Сохраняем в MongoDB
+            await dialogsCollection.replaceOne(
+                { userId: userId },
+                {
+                    userId: userId,
+                    ...conversation,
+                    updatedAt: new Date()
+                },
+                { upsert: true }
+            );
+            console.log(`💾 Диалог пользователя ${userId} сохранен в MongoDB`);
+        } else {
+            // Fallback: сохраняем в памяти
+            database.conversations.set(userId, conversation);
+            console.log(`💾 Диалог пользователя ${userId} сохранен в памяти`);
+        }
     } catch (error) {
-        console.error('Ошибка сохранения диалога:', error);
+        console.error('❌ Ошибка сохранения диалога:', error);
+        // Fallback к памяти
+        database.conversations.set(userId, conversation);
     }
 }
 
 // Функция для загрузки диалога пользователя
 async function loadUserDialog(userId) {
     try {
-        const filename = path.join(DIALOGS_DIR, `user_${userId}.json`);
-        const data = await fs.readFile(filename, 'utf8');
-        const conversation = JSON.parse(data);
-        console.log(`Диалог пользователя ${userId} загружен (${conversation.messages.length} сообщений)`);
-        return conversation;
+        if (db && dialogsCollection) {
+            // Загружаем из MongoDB
+            const conversation = await dialogsCollection.findOne({ userId: userId });
+            if (conversation) {
+                console.log(`📖 Диалог пользователя ${userId} загружен из MongoDB (${conversation.messages.length} сообщений)`);
+                return conversation;
+            }
+        } else {
+            // Fallback: загружаем из памяти
+            const conversation = database.conversations.get(userId);
+            if (conversation) {
+                console.log(`📖 Диалог пользователя ${userId} загружен из памяти (${conversation.messages.length} сообщений)`);
+                return conversation;
+            }
+        }
+        
+        console.log(`🆕 Создается новый диалог для пользователя ${userId}`);
+        return null;
     } catch (error) {
-        // Файл не существует - создаем новый диалог
-        console.log(`Создается новый диалог для пользователя ${userId}`);
+        console.error('❌ Ошибка загрузки диалога:', error);
+        // Fallback к памяти
+        const conversation = database.conversations.get(userId);
+        if (conversation) {
+            return conversation;
+        }
         return null;
     }
 }
@@ -70,22 +114,20 @@ async function loadUserDialog(userId) {
 // Функция для получения списка всех диалогов
 async function getAllDialogs() {
     try {
-        const files = await fs.readdir(DIALOGS_DIR);
-        const dialogs = [];
-        
-        for (const file of files) {
-            if (file.startsWith('user_') && file.endsWith('.json')) {
-                const userId = file.replace('user_', '').replace('.json', '');
-                const conversation = await loadUserDialog(userId);
-                if (conversation) {
-                    dialogs.push({ userId, conversation });
-                }
+        if (db && dialogsCollection) {
+            // Загружаем из MongoDB
+            const dialogs = await dialogsCollection.find({}).toArray();
+            return dialogs.map(d => ({ userId: d.userId, conversation: d }));
+        } else {
+            // Fallback: загружаем из памяти
+            const dialogs = [];
+            for (const [userId, conversation] of database.conversations) {
+                dialogs.push({ userId, conversation });
             }
+            return dialogs;
         }
-        
-        return dialogs;
     } catch (error) {
-        console.error('Ошибка загрузки диалогов:', error);
+        console.error('❌ Ошибка загрузки диалогов:', error);
         return [];
     }
 }
@@ -434,9 +476,13 @@ app.get('/dialogs', async (req, res) => {
                 .timestamp { font-size: 12px; color: #666; }
                 .success { color: #4caf50; font-weight: bold; }
                 .stats { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+                .storage-info { background: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #ffc107; }
             </style>
         </head>
         <body>
+            <div class="storage-info">
+                <strong>💾 Хранилище:</strong> ${db ? 'MongoDB (постоянное)' : 'Память (временное, сбрасывается при перезапуске)'}
+            </div>
             <div class="stats">
                 <h1>📊 Статистика диалогов Skill Hunter</h1>
                 <p><strong>Всего пользователей:</strong> ${allDialogs.length}</p>
@@ -497,7 +543,7 @@ app.get('/stats', async (req, res) => {
             totalMessages: totalMessages,
             overallConversion: totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0,
             successfulCases: database.successfulCases.length,
-            dialogsDir: DIALOGS_DIR
+            storageType: db ? 'MongoDB' : 'Memory'
         });
     } catch (error) {
         res.status(500).json({ error: 'Ошибка загрузки статистики', details: error.message });
@@ -506,12 +552,12 @@ app.get('/stats', async (req, res) => {
 
 // Запуск сервера
 app.listen(config.port, async () => {
-    // Создаем папку для диалогов при запуске
-    await ensureDialogsDir();
+    // Подключаемся к MongoDB при запуске
+    await connectToMongoDB();
     
     console.log(`Сервер запущен на порту ${config.port}`);
     console.log('Telegram бот активен!');
-    console.log('Папка для диалогов:', DIALOGS_DIR);
+    console.log('Система хранения:', db ? 'MongoDB (постоянное)' : 'Память (временное)');
 });
 
 // Обработка завершения процесса

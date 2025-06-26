@@ -218,7 +218,7 @@ function isSuccessfulConversation(messages) {
 }
 
 // Функция для создания промпта с учетом истории и самообучения
-function createPrompt(userMessage, conversationHistory, userId) {
+function createSystemPrompt() {
     let learningPrompt = '';
     
     // Добавляем знания из успешных кейсов
@@ -239,19 +239,35 @@ ${recentSuccessfulCases.map(successCase => `
 ${learningPrompt}
 
 ИНСТРУКЦИИ:
-- Вы AI-рекрутер Александра
+- Вы AI-рекрутер Александра из компании Skill Hunter
 - Общайтесь профессионально, но дружелюбно
 - Задавайте вопросы о проблемах клиента в найме
-- Показывайте конкретную пользу и ROI
-- Предлагайте демо/презентацию
+- Показывайте конкретную пользу и ROI (89% точность, экономия до 3 млн ₽)
+- Предлагайте бесплатный тест-драйв (10 интервью бесплатно)
 - Используйте знания из успешных кейсов выше
+- Отвечайте на основе ВСЕЙ истории диалога с этим пользователем`;
+}
 
-ИСТОРИЯ ДИАЛОГА:
-${conversationHistory.map(msg => `${msg.role}: ${msg.content}`).join('\n')}
+// Функция для конвертации истории диалога в формат OpenAI
+function convertToOpenAIMessages(conversationHistory) {
+    const messages = [
+        {
+            role: "system",
+            content: createSystemPrompt()
+        }
+    ];
 
-ТЕКУЩЕЕ СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ: ${userMessage}
+    // Добавляем всю историю диалога
+    conversationHistory.forEach(msg => {
+        if (msg.role === 'user' || msg.role === 'assistant') {
+            messages.push({
+                role: msg.role,
+                content: msg.content
+            });
+        }
+    });
 
-Ответьте как AI-рекрутер Александра:`;
+    return messages;
 }
 
 // Обработка сообщений
@@ -277,7 +293,7 @@ bot.on('message', async (msg) => {
                 lastActivity: timestamp
             };
             
-            // Обновляем статистику
+            // Обновляем статистику только для новых пользователей
             if (database.dailyStats.date !== timestamp.toDateString()) {
                 database.dailyStats = {
                     totalConversations: 1,
@@ -287,20 +303,22 @@ bot.on('message', async (msg) => {
             } else {
                 database.dailyStats.totalConversations++;
             }
+
+            // Добавляем приветственное сообщение
+            conversation.messages.push({ 
+                role: 'assistant', 
+                content: welcomeMessage, 
+                timestamp: timestamp 
+            });
+            
+            await bot.sendMessage(userId, welcomeMessage);
+        } else {
+            // Пользователь уже существует - просто приветствуем
+            await bot.sendMessage(userId, "С возвращением! Продолжаем наш диалог. Что вас интересует?");
         }
 
-        // Добавляем приветственное сообщение
-        conversation.messages.push({ 
-            role: 'assistant', 
-            content: welcomeMessage, 
-            timestamp: timestamp 
-        });
         conversation.lastActivity = timestamp;
-
-        // Сохраняем диалог
         await saveUserDialog(userId, conversation);
-
-        await bot.sendMessage(userId, welcomeMessage);
         return;
     }
 
@@ -335,13 +353,18 @@ bot.on('message', async (msg) => {
     conversation.lastActivity = timestamp;
 
     try {
-        // Создаем промпт для OpenAI с полной историей диалога
-        const prompt = createPrompt(userMessage, conversation.messages, userId);
+        // Конвертируем историю диалога в формат OpenAI
+        const messages = convertToOpenAIMessages(conversation.messages);
 
-        // Отправляем запрос в OpenAI
+        console.log(`🧠 Отправляем в GPT ${messages.length} сообщений (включая системный промпт)`);
+        console.log(`📝 Последние 3 сообщения в истории:`, 
+            conversation.messages.slice(-3).map(m => `${m.role}: ${m.content.substring(0, 50)}...`)
+        );
+
+        // Отправляем запрос в OpenAI с полной историей
         const response = await openai.chat.completions.create({
             model: 'gpt-3.5-turbo',
-            messages: [{ role: 'user', content: prompt }],
+            messages: messages,
             max_tokens: 500,
             temperature: 0.7
         });

@@ -2,6 +2,8 @@ const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 const express = require('express');
 const cron = require('node-cron');
+const fs = require('fs').promises;
+const path = require('path');
 
 // Конфигурция (заполните своими данными)
 const config = {
@@ -16,9 +18,8 @@ const bot = new TelegramBot(config.telegramToken, { polling: true });
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const app = express();
 
-// База данных в памяти (для production используйте MongoDB или PostgreSQL)
+// База данных в памяти и файловая система
 const database = {
-    conversations: new Map(), // userId -> {messages: [], isSuccessful: false, startTime: Date}
     dailyStats: {
         totalConversations: 0,
         successfulConversations: 0,
@@ -26,6 +27,68 @@ const database = {
     },
     successfulCases: [] // Для самообучения
 };
+
+// Папка для хранения диалогов
+const DIALOGS_DIR = './dialogs';
+
+// Функция для создания папки диалогов
+async function ensureDialogsDir() {
+    try {
+        await fs.access(DIALOGS_DIR);
+    } catch {
+        await fs.mkdir(DIALOGS_DIR, { recursive: true });
+        console.log('Создана папка для диалогов:', DIALOGS_DIR);
+    }
+}
+
+// Функция для сохранения диалога пользователя
+async function saveUserDialog(userId, conversation) {
+    try {
+        const filename = path.join(DIALOGS_DIR, `user_${userId}.json`);
+        await fs.writeFile(filename, JSON.stringify(conversation, null, 2), 'utf8');
+        console.log(`Диалог пользователя ${userId} сохранен`);
+    } catch (error) {
+        console.error('Ошибка сохранения диалога:', error);
+    }
+}
+
+// Функция для загрузки диалога пользователя
+async function loadUserDialog(userId) {
+    try {
+        const filename = path.join(DIALOGS_DIR, `user_${userId}.json`);
+        const data = await fs.readFile(filename, 'utf8');
+        const conversation = JSON.parse(data);
+        console.log(`Диалог пользователя ${userId} загружен (${conversation.messages.length} сообщений)`);
+        return conversation;
+    } catch (error) {
+        // Файл не существует - создаем новый диалог
+        console.log(`Создается новый диалог для пользователя ${userId}`);
+        return null;
+    }
+}
+
+// Функция для получения списка всех диалогов
+async function getAllDialogs() {
+    try {
+        const files = await fs.readdir(DIALOGS_DIR);
+        const dialogs = [];
+        
+        for (const file of files) {
+            if (file.startsWith('user_') && file.endsWith('.json')) {
+                const userId = file.replace('user_', '').replace('.json', '');
+                const conversation = await loadUserDialog(userId);
+                if (conversation) {
+                    dialogs.push({ userId, conversation });
+                }
+            }
+        }
+        
+        return dialogs;
+    } catch (error) {
+        console.error('Ошибка загрузки диалогов:', error);
+        return [];
+    }
+}
 
 // База знаний компании Skill Hunter
 const companyKnowledge = `
@@ -158,46 +221,79 @@ bot.on('message', async (msg) => {
 
     // Команда /start
     if (userMessage === '/start') {
-        // Инициализация нового диалога
-        database.conversations.set(userId, {
-            messages: [{ role: 'assistant', content: welcomeMessage, timestamp }],
-            isSuccessful: false,
-            startTime: timestamp,
-            userName: userName
-        });
+        // Загружаем существующий диалог или создаем новый
+        let conversation = await loadUserDialog(userId);
         
-        // Обновляем статистику
-        if (database.dailyStats.date !== timestamp.toDateString()) {
-            database.dailyStats = {
-                totalConversations: 1,
-                successfulConversations: 0,
-                date: timestamp.toDateString()
+        if (!conversation) {
+            // Создаем новый диалог
+            conversation = {
+                userId: userId,
+                userName: userName,
+                messages: [],
+                isSuccessful: false,
+                startTime: timestamp,
+                lastActivity: timestamp
             };
-        } else {
-            database.dailyStats.totalConversations++;
+            
+            // Обновляем статистику
+            if (database.dailyStats.date !== timestamp.toDateString()) {
+                database.dailyStats = {
+                    totalConversations: 1,
+                    successfulConversations: 0,
+                    date: timestamp.toDateString()
+                };
+            } else {
+                database.dailyStats.totalConversations++;
+            }
         }
+
+        // Добавляем приветственное сообщение
+        conversation.messages.push({ 
+            role: 'assistant', 
+            content: welcomeMessage, 
+            timestamp: timestamp 
+        });
+        conversation.lastActivity = timestamp;
+
+        // Сохраняем диалог
+        await saveUserDialog(userId, conversation);
 
         await bot.sendMessage(userId, welcomeMessage);
         return;
     }
 
-    // Получаем историю диалога
-    let conversation = database.conversations.get(userId);
+    // Загружаем диалог пользователя
+    let conversation = await loadUserDialog(userId);
+    
     if (!conversation) {
+        // Если диалог не найден, создаем новый
         conversation = {
+            userId: userId,
+            userName: userName,
             messages: [],
             isSuccessful: false,
             startTime: timestamp,
-            userName: userName
+            lastActivity: timestamp
         };
-        database.conversations.set(userId, conversation);
+        
+        // Добавляем приветственное сообщение в историю
+        conversation.messages.push({ 
+            role: 'assistant', 
+            content: welcomeMessage, 
+            timestamp: timestamp 
+        });
     }
 
     // Добавляем сообщение пользователя
-    conversation.messages.push({ role: 'user', content: userMessage, timestamp });
+    conversation.messages.push({ 
+        role: 'user', 
+        content: userMessage, 
+        timestamp: timestamp 
+    });
+    conversation.lastActivity = timestamp;
 
     try {
-        // Создаем промпт для OpenAI
+        // Создаем промпт для OpenAI с полной историей диалога
         const prompt = createPrompt(userMessage, conversation.messages, userId);
 
         // Отправляем запрос в OpenAI
@@ -211,7 +307,11 @@ bot.on('message', async (msg) => {
         const botResponse = response.choices[0].message.content;
 
         // Добавляем ответ бота
-        conversation.messages.push({ role: 'assistant', content: botResponse, timestamp });
+        conversation.messages.push({ 
+            role: 'assistant', 
+            content: botResponse, 
+            timestamp: timestamp 
+        });
 
         // Проверяем успешность диалога
         if (!conversation.isSuccessful && isSuccessfulConversation(conversation.messages)) {
@@ -232,7 +332,12 @@ bot.on('message', async (msg) => {
             if (database.successfulCases.length > 50) {
                 database.successfulCases.shift();
             }
+
+            console.log(`🎯 Успешный диалог с пользователем ${userId} (${userName})`);
         }
+
+        // Сохраняем обновленный диалог
+        await saveUserDialog(userId, conversation);
 
         // Отправляем ответ пользователю
         await bot.sendMessage(userId, botResponse);
@@ -271,11 +376,21 @@ cron.schedule('0 18 * * *', async () => {
             ? Math.round((stats.successfulConversations / stats.totalConversations) * 100)
             : 0;
 
+        // Получаем общую статистику из файлов
+        const allDialogs = await getAllDialogs();
+        const totalUsers = allDialogs.length;
+        const successfulUsers = allDialogs.filter(d => d.conversation.isSuccessful).length;
+
         const reportMessage = `📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ
 📅 Дата: ${today}
-💬 Проведено диалогов: ${stats.totalConversations}
-✅ Заинтересовалось: ${stats.successfulConversations} человек
-📈 Конверсия: ${conversionRate}%
+💬 Проведено диалогов сегодня: ${stats.totalConversations}
+✅ Заинтересовалось сегодня: ${stats.successfulConversations} человек
+📈 Конверсия за день: ${conversionRate}%
+
+📈 ОБЩАЯ СТАТИСТИКА:
+👥 Всего пользователей: ${totalUsers}
+🎯 Успешных диалогов: ${successfulUsers}
+📊 Общая конверсия: ${totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0}%
 
 ${stats.successfulConversations > 0 ? '🎯 Успешные диалоги сегодня!' : '🔄 Работаем над улучшением результатов'}`;
 
@@ -299,18 +414,104 @@ app.get('/', (req, res) => {
     res.send('Telegram Sales Bot работает!');
 });
 
-app.get('/stats', (req, res) => {
-    res.json({
-        dailyStats: database.dailyStats,
-        totalConversations: database.conversations.size,
-        successfulCases: database.successfulCases.length
-    });
+app.get('/dialogs', async (req, res) => {
+    try {
+        const allDialogs = await getAllDialogs();
+        
+        let html = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Диалоги Skill Hunter Bot</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+                .dialog { background: white; margin: 20px 0; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .dialog-header { background: #2196F3; color: white; padding: 10px; margin: -20px -20px 20px -20px; border-radius: 8px 8px 0 0; }
+                .message { margin: 10px 0; padding: 10px; border-radius: 5px; }
+                .user-message { background: #e3f2fd; border-left: 4px solid #2196F3; }
+                .bot-message { background: #f3e5f5; border-left: 4px solid #9c27b0; }
+                .timestamp { font-size: 12px; color: #666; }
+                .success { color: #4caf50; font-weight: bold; }
+                .stats { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+            </style>
+        </head>
+        <body>
+            <div class="stats">
+                <h1>📊 Статистика диалогов Skill Hunter</h1>
+                <p><strong>Всего пользователей:</strong> ${allDialogs.length}</p>
+                <p><strong>Успешных диалогов:</strong> ${allDialogs.filter(d => d.conversation.isSuccessful).length}</p>
+                <p><strong>Конверсия:</strong> ${allDialogs.length > 0 ? Math.round((allDialogs.filter(d => d.conversation.isSuccessful).length / allDialogs.length) * 100) : 0}%</p>
+            </div>
+        `;
+        
+        allDialogs.forEach(({userId, conversation}) => {
+            const lastActivity = new Date(conversation.lastActivity || conversation.startTime).toLocaleString('ru-RU');
+            const messagesCount = conversation.messages.length;
+            const successBadge = conversation.isSuccessful ? '<span class="success">✅ УСПЕШНЫЙ</span>' : '';
+            
+            html += `
+            <div class="dialog">
+                <div class="dialog-header">
+                    <h3>👤 ${conversation.userName} (ID: ${userId}) ${successBadge}</h3>
+                    <p>Последняя активность: ${lastActivity} | Сообщений: ${messagesCount}</p>
+                </div>
+            `;
+            
+            conversation.messages.forEach(msg => {
+                const messageClass = msg.role === 'user' ? 'user-message' : 'bot-message';
+                const roleIcon = msg.role === 'user' ? '👤' : '🤖';
+                const timestamp = new Date(msg.timestamp).toLocaleString('ru-RU');
+                
+                html += `
+                <div class="message ${messageClass}">
+                    <strong>${roleIcon} ${msg.role === 'user' ? conversation.userName : 'Skill Hunter Bot'}:</strong><br>
+                    ${msg.content.replace(/\n/g, '<br>')}
+                    <div class="timestamp">${timestamp}</div>
+                </div>
+                `;
+            });
+            
+            html += '</div>';
+        });
+        
+        html += '</body></html>';
+        res.send(html);
+        
+    } catch (error) {
+        res.status(500).send(`Ошибка загрузки диалогов: ${error.message}`);
+    }
+});
+
+app.get('/stats', async (req, res) => {
+    try {
+        const allDialogs = await getAllDialogs();
+        const totalUsers = allDialogs.length;
+        const successfulUsers = allDialogs.filter(d => d.conversation.isSuccessful).length;
+        const totalMessages = allDialogs.reduce((sum, d) => sum + d.conversation.messages.length, 0);
+        
+        res.json({
+            dailyStats: database.dailyStats,
+            totalUsers: totalUsers,
+            successfulUsers: successfulUsers,
+            totalMessages: totalMessages,
+            overallConversion: totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0,
+            successfulCases: database.successfulCases.length,
+            dialogsDir: DIALOGS_DIR
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Ошибка загрузки статистики', details: error.message });
+    }
 });
 
 // Запуск сервера
-app.listen(config.port, () => {
+app.listen(config.port, async () => {
+    // Создаем папку для диалогов при запуске
+    await ensureDialogsDir();
+    
     console.log(`Сервер запущен на порту ${config.port}`);
     console.log('Telegram бот активен!');
+    console.log('Папка для диалогов:', DIALOGS_DIR);
 });
 
 // Обработка завершения процесса

@@ -2,14 +2,14 @@ const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 const express = require('express');
 const cron = require('node-cron');
-const { MongoClient } = require('mongodb');
+const { Pool } = require('pg');
 
 // Конфигурция (заполните своими данными)
 const config = {
     telegramToken: process.env.TELEGRAM_BOT_TOKEN, // Получите у @BotFather
     openaiApiKey: process.env.OPENAI_API_KEY,      // Ваш OpenAI API ключ
     adminTelegramId: process.env.ADMIN_TELEGRAM_ID, // Ваш Telegram ID для отчетов
-    mongoUrl: process.env.MONGODB_URL || 'mongodb://localhost:27017/skillhunter', // MongoDB URL
+    databaseUrl: process.env.DATABASE_URL,         // PostgreSQL URL от Render.com
     port: process.env.PORT || 3000
 };
 
@@ -18,30 +18,43 @@ const bot = new TelegramBot(config.telegramToken, { polling: true });
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const app = express();
 
-// MongoDB подключение
-let db;
-let dialogsCollection;
+// PostgreSQL подключение
+let pool;
 
-async function connectToMongoDB() {
+async function connectToPostgreSQL() {
     try {
-        const client = new MongoClient(config.mongoUrl);
-        await client.connect();
-        db = client.db('skillhunter');
-        dialogsCollection = db.collection('dialogs');
-        console.log('✅ Подключено к MongoDB');
+        pool = new Pool({
+            connectionString: config.databaseUrl,
+            ssl: config.databaseUrl ? { rejectUnauthorized: false } : false
+        });
         
-        // Создаем индекс для быстрого поиска по userId
-        await dialogsCollection.createIndex({ userId: 1 });
+        // Проверяем подключение
+        await pool.query('SELECT NOW()');
+        console.log('✅ Подключено к PostgreSQL');
+        
+        // Создаем таблицу для диалогов
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS dialogs (
+                user_id BIGINT PRIMARY KEY,
+                user_name VARCHAR(255),
+                messages JSONB NOT NULL,
+                is_successful BOOLEAN DEFAULT FALSE,
+                start_time TIMESTAMP DEFAULT NOW(),
+                last_activity TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        `);
+        
+        console.log('✅ Таблица диалогов создана');
         
     } catch (error) {
-        console.error('❌ Ошибка подключения к MongoDB:', error);
-        // Fallback к локальному хранилищу
+        console.error('❌ Ошибка подключения к PostgreSQL:', error.message);
         console.log('🔄 Используем локальное хранилище в памяти');
-        db = null;
+        pool = null;
     }
 }
 
-// База данных в памяти и MongoDB
+// База данных в памяти и PostgreSQL
 const database = {
     conversations: new Map(), // Fallback для локального хранения
     dailyStats: {
@@ -55,18 +68,28 @@ const database = {
 // Функция для сохранения диалога пользователя
 async function saveUserDialog(userId, conversation) {
     try {
-        if (db && dialogsCollection) {
-            // Сохраняем в MongoDB
-            await dialogsCollection.replaceOne(
-                { userId: userId },
-                {
-                    userId: userId,
-                    ...conversation,
-                    updatedAt: new Date()
-                },
-                { upsert: true }
+        if (pool) {
+            // Сохраняем в PostgreSQL
+            await pool.query(
+                `INSERT INTO dialogs (user_id, user_name, messages, is_successful, start_time, last_activity, updated_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, NOW())
+                 ON CONFLICT (user_id) 
+                 DO UPDATE SET 
+                    user_name = $2,
+                    messages = $3,
+                    is_successful = $4,
+                    last_activity = $6,
+                    updated_at = NOW()`,
+                [
+                    userId,
+                    conversation.userName,
+                    JSON.stringify(conversation.messages),
+                    conversation.isSuccessful,
+                    conversation.startTime,
+                    conversation.lastActivity
+                ]
             );
-            console.log(`💾 Диалог пользователя ${userId} сохранен в MongoDB`);
+            console.log(`💾 Диалог пользователя ${userId} сохранен в PostgreSQL`);
         } else {
             // Fallback: сохраняем в памяти
             database.conversations.set(userId, conversation);
@@ -82,11 +105,24 @@ async function saveUserDialog(userId, conversation) {
 // Функция для загрузки диалога пользователя
 async function loadUserDialog(userId) {
     try {
-        if (db && dialogsCollection) {
-            // Загружаем из MongoDB
-            const conversation = await dialogsCollection.findOne({ userId: userId });
-            if (conversation) {
-                console.log(`📖 Диалог пользователя ${userId} загружен из MongoDB (${conversation.messages.length} сообщений)`);
+        if (pool) {
+            // Загружаем из PostgreSQL
+            const result = await pool.query(
+                'SELECT * FROM dialogs WHERE user_id = $1',
+                [userId]
+            );
+            
+            if (result.rows.length > 0) {
+                const row = result.rows[0];
+                const conversation = {
+                    userId: row.user_id,
+                    userName: row.user_name,
+                    messages: row.messages,
+                    isSuccessful: row.is_successful,
+                    startTime: row.start_time,
+                    lastActivity: row.last_activity
+                };
+                console.log(`📖 Диалог пользователя ${userId} загружен из PostgreSQL (${conversation.messages.length} сообщений)`);
                 return conversation;
             }
         } else {
@@ -114,10 +150,20 @@ async function loadUserDialog(userId) {
 // Функция для получения списка всех диалогов
 async function getAllDialogs() {
     try {
-        if (db && dialogsCollection) {
-            // Загружаем из MongoDB
-            const dialogs = await dialogsCollection.find({}).toArray();
-            return dialogs.map(d => ({ userId: d.userId, conversation: d }));
+        if (pool) {
+            // Загружаем из PostgreSQL
+            const result = await pool.query('SELECT * FROM dialogs ORDER BY last_activity DESC');
+            return result.rows.map(row => ({
+                userId: row.user_id,
+                conversation: {
+                    userId: row.user_id,
+                    userName: row.user_name,
+                    messages: row.messages,
+                    isSuccessful: row.is_successful,
+                    startTime: row.start_time,
+                    lastActivity: row.last_activity
+                }
+            }));
         } else {
             // Fallback: загружаем из памяти
             const dialogs = [];
@@ -504,7 +550,7 @@ app.get('/dialogs', async (req, res) => {
         </head>
         <body>
             <div class="storage-info">
-                <strong>💾 Хранилище:</strong> ${db ? 'MongoDB (постоянное)' : 'Память (временное, сбрасывается при перезапуске)'}
+                <strong>💾 Хранилище:</strong> ${pool ? 'PostgreSQL (постоянное)' : 'Память (временное, сбрасывается при перезапуске)'}
             </div>
             <div class="stats">
                 <h1>📊 Статистика диалогов Skill Hunter</h1>
@@ -566,7 +612,7 @@ app.get('/stats', async (req, res) => {
             totalMessages: totalMessages,
             overallConversion: totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0,
             successfulCases: database.successfulCases.length,
-            storageType: db ? 'MongoDB' : 'Memory'
+            storageType: pool ? 'PostgreSQL' : 'Memory'
         });
     } catch (error) {
         res.status(500).json({ error: 'Ошибка загрузки статистики', details: error.message });
@@ -575,12 +621,12 @@ app.get('/stats', async (req, res) => {
 
 // Запуск сервера
 app.listen(config.port, async () => {
-    // Подключаемся к MongoDB при запуске
-    await connectToMongoDB();
+    // Подключаемся к PostgreSQL при запуске
+    await connectToPostgreSQL();
     
     console.log(`Сервер запущен на порту ${config.port}`);
     console.log('Telegram бот активен!');
-    console.log('Система хранения:', db ? 'MongoDB (постоянное)' : 'Память (временное)');
+    console.log('Система хранения:', pool ? 'PostgreSQL (постоянное)' : 'Память (временное)');
 });
 
 // Обработка завершения процесса

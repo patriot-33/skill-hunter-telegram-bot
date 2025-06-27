@@ -352,7 +352,9 @@ bot.on('message', async (msg) => {
             input: messages
         });
 
-        const botResponse = response.choices[0].message.content;
+        console.log('🔍 Структура ответа от OpenAI:', JSON.stringify(response, null, 2));
+        
+        const botResponse = response.content || response.text || response.message || 'Извините, не удалось получить ответ.';
 
         // Добавляем ответ бота
         conversation.messages.push({ 

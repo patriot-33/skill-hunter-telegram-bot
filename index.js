@@ -2,14 +2,12 @@ const TelegramBot = require('node-telegram-bot-api');
 const OpenAI = require('openai');
 const express = require('express');
 const cron = require('node-cron');
-const { Pool } = require('pg');
 
-// Конфигурция (заполните своими данными)
+// Конфигурция
 const config = {
-    telegramToken: process.env.TELEGRAM_BOT_TOKEN, // Получите у @BotFather
-    openaiApiKey: process.env.OPENAI_API_KEY,      // Ваш OpenAI API ключ
-    adminTelegramId: process.env.ADMIN_TELEGRAM_ID, // Ваш Telegram ID для отчетов
-    databaseUrl: process.env.DATABASE_URL,         // PostgreSQL URL от Render.com
+    telegramToken: process.env.TELEGRAM_BOT_TOKEN,
+    openaiApiKey: process.env.OPENAI_API_KEY,
+    adminTelegramId: process.env.ADMIN_TELEGRAM_ID,
     port: process.env.PORT || 3000
 };
 
@@ -18,164 +16,42 @@ const bot = new TelegramBot(config.telegramToken, { polling: true });
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const app = express();
 
-// PostgreSQL подключение
-let pool;
-
-async function connectToPostgreSQL() {
-    try {
-        pool = new Pool({
-            connectionString: config.databaseUrl,
-            ssl: config.databaseUrl ? { rejectUnauthorized: false } : false
-        });
-        
-        // Проверяем подключение
-        await pool.query('SELECT NOW()');
-        console.log('✅ Подключено к PostgreSQL');
-        
-        // Создаем таблицу для диалогов
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS dialogs (
-                user_id BIGINT PRIMARY KEY,
-                user_name VARCHAR(255),
-                messages JSONB NOT NULL,
-                is_successful BOOLEAN DEFAULT FALSE,
-                start_time TIMESTAMP DEFAULT NOW(),
-                last_activity TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        `);
-        
-        console.log('✅ Таблица диалогов создана');
-        
-    } catch (error) {
-        console.error('❌ Ошибка подключения к PostgreSQL:', error.message);
-        console.log('🔄 Используем локальное хранилище в памяти');
-        pool = null;
-    }
-}
-
-// База данных в памяти и PostgreSQL
+// База данных в памяти
 const database = {
-    conversations: new Map(), // Fallback для локального хранения
+    conversations: new Map(),
     dailyStats: {
         totalConversations: 0,
         successfulConversations: 0,
         date: new Date().toDateString()
     },
-    successfulCases: [] // Для самообучения
+    successfulCases: []
 };
 
 // Функция для сохранения диалога пользователя
 async function saveUserDialog(userId, conversation) {
-    try {
-        if (pool) {
-            // Сохраняем в PostgreSQL
-            await pool.query(
-                `INSERT INTO dialogs (user_id, user_name, messages, is_successful, start_time, last_activity, updated_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, NOW())
-                 ON CONFLICT (user_id) 
-                 DO UPDATE SET 
-                    user_name = $2,
-                    messages = $3,
-                    is_successful = $4,
-                    last_activity = $6,
-                    updated_at = NOW()`,
-                [
-                    userId,
-                    conversation.userName,
-                    JSON.stringify(conversation.messages),
-                    conversation.isSuccessful,
-                    conversation.startTime,
-                    conversation.lastActivity
-                ]
-            );
-            console.log(`💾 Диалог пользователя ${userId} сохранен в PostgreSQL`);
-        } else {
-            // Fallback: сохраняем в памяти
-            database.conversations.set(userId, conversation);
-            console.log(`💾 Диалог пользователя ${userId} сохранен в памяти`);
-        }
-    } catch (error) {
-        console.error('❌ Ошибка сохранения диалога:', error);
-        // Fallback к памяти
-        database.conversations.set(userId, conversation);
-    }
+    database.conversations.set(userId, conversation);
+    console.log(`💾 Диалог пользователя ${userId} сохранен в памяти`);
 }
 
 // Функция для загрузки диалога пользователя
 async function loadUserDialog(userId) {
-    try {
-        if (pool) {
-            // Загружаем из PostgreSQL
-            const result = await pool.query(
-                'SELECT * FROM dialogs WHERE user_id = $1',
-                [userId]
-            );
-            
-            if (result.rows.length > 0) {
-                const row = result.rows[0];
-                const conversation = {
-                    userId: row.user_id,
-                    userName: row.user_name,
-                    messages: row.messages,
-                    isSuccessful: row.is_successful,
-                    startTime: row.start_time,
-                    lastActivity: row.last_activity
-                };
-                console.log(`📖 Диалог пользователя ${userId} загружен из PostgreSQL (${conversation.messages.length} сообщений)`);
-                return conversation;
-            }
-        } else {
-            // Fallback: загружаем из памяти
-            const conversation = database.conversations.get(userId);
-            if (conversation) {
-                console.log(`📖 Диалог пользователя ${userId} загружен из памяти (${conversation.messages.length} сообщений)`);
-                return conversation;
-            }
-        }
-        
-        console.log(`🆕 Создается новый диалог для пользователя ${userId}`);
-        return null;
-    } catch (error) {
-        console.error('❌ Ошибка загрузки диалога:', error);
-        // Fallback к памяти
-        const conversation = database.conversations.get(userId);
-        if (conversation) {
-            return conversation;
-        }
-        return null;
+    const conversation = database.conversations.get(userId);
+    if (conversation) {
+        console.log(`📖 Диалог пользователя ${userId} загружен из памяти (${conversation.messages.length} сообщений)`);
+        return conversation;
     }
+    
+    console.log(`🆕 Создается новый диалог для пользователя ${userId}`);
+    return null;
 }
 
 // Функция для получения списка всех диалогов
 async function getAllDialogs() {
-    try {
-        if (pool) {
-            // Загружаем из PostgreSQL
-            const result = await pool.query('SELECT * FROM dialogs ORDER BY last_activity DESC');
-            return result.rows.map(row => ({
-                userId: row.user_id,
-                conversation: {
-                    userId: row.user_id,
-                    userName: row.user_name,
-                    messages: row.messages,
-                    isSuccessful: row.is_successful,
-                    startTime: row.start_time,
-                    lastActivity: row.last_activity
-                }
-            }));
-        } else {
-            // Fallback: загружаем из памяти
-            const dialogs = [];
-            for (const [userId, conversation] of database.conversations) {
-                dialogs.push({ userId, conversation });
-            }
-            return dialogs;
-        }
-    } catch (error) {
-        console.error('❌ Ошибка загрузки диалогов:', error);
-        return [];
+    const dialogs = [];
+    for (const [userId, conversation] of database.conversations) {
+        dialogs.push({ userId, conversation });
     }
+    return dialogs;
 }
 
 // База знаний компании Skill Hunter
@@ -284,14 +160,20 @@ ${recentSuccessfulCases.map(successCase => `
 
 ${learningPrompt}
 
-ИНСТРУКЦИИ:
+КРИТИЧЕСКИ ВАЖНЫЕ ИНСТРУКЦИИ:
 - Вы AI-рекрутер Александра из компании Skill Hunter
+- ВЫ ОБЯЗАТЕЛЬНО ПОМНИТЕ ВСЮ ИСТОРИЮ ДИАЛОГА с каждым пользователем
+- ВСЕГДА используйте информацию из предыдущих сообщений этого диалога
+- ПОМНИТЕ имена, названия компаний, детали которые сообщал пользователь
+- Если пользователь спрашивает "что ты знаешь обо мне" - ОБЯЗАТЕЛЬНО перечислите всю информацию из истории диалога
+- Ссылайтесь на предыдущие сообщения пользователя в этом диалоге
 - Общайтесь профессионально, но дружелюбно
 - Задавайте вопросы о проблемах клиента в найме
 - Показывайте конкретную пользу и ROI (89% точность, экономия до 3 млн ₽)
 - Предлагайте бесплатный тест-драйв (10 интервью бесплатно)
 - Используйте знания из успешных кейсов выше
-- Отвечайте на основе ВСЕЙ истории диалога с этим пользователем`;
+
+ВАЖНО: У вас есть доступ ко всей истории диалога с этим пользователем. Используйте эту информацию!`;
 }
 
 // Функция для конвертации истории диалога в формат OpenAI
@@ -312,6 +194,12 @@ function convertToOpenAIMessages(conversationHistory) {
             });
         }
     });
+
+    // Логируем для отладки
+    console.log(`🔧 Сформировано ${messages.length} сообщений для GPT:`);
+    console.log(`   - Системный промпт: 1`);
+    console.log(`   - Сообщений пользователя: ${messages.filter(m => m.role === 'user').length}`);
+    console.log(`   - Ответов ассистента: ${messages.filter(m => m.role === 'assistant').length}`);
 
     return messages;
 }
@@ -406,6 +294,7 @@ bot.on('message', async (msg) => {
         console.log(`📝 Последние 3 сообщения в истории:`, 
             conversation.messages.slice(-3).map(m => `${m.role}: ${m.content.substring(0, 50)}...`)
         );
+        console.log(`🔍 Проверка: история содержит ${conversation.messages.filter(m => m.role === 'user').length} сообщений пользователя`);
 
         // Отправляем запрос в OpenAI с полной историей
         const response = await openai.chat.completions.create({
@@ -550,7 +439,7 @@ app.get('/dialogs', async (req, res) => {
         </head>
         <body>
             <div class="storage-info">
-                <strong>💾 Хранилище:</strong> ${pool ? 'PostgreSQL (постоянное)' : 'Память (временное, сбрасывается при перезапуске)'}
+                <strong>💾 Хранилище:</strong> Память (временное, сбрасывается при перезапуске)
             </div>
             <div class="stats">
                 <h1>📊 Статистика диалогов Skill Hunter</h1>
@@ -612,7 +501,7 @@ app.get('/stats', async (req, res) => {
             totalMessages: totalMessages,
             overallConversion: totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0,
             successfulCases: database.successfulCases.length,
-            storageType: pool ? 'PostgreSQL' : 'Memory'
+            storageType: 'Memory'
         });
     } catch (error) {
         res.status(500).json({ error: 'Ошибка загрузки статистики', details: error.message });
@@ -620,13 +509,10 @@ app.get('/stats', async (req, res) => {
 });
 
 // Запуск сервера
-app.listen(config.port, async () => {
-    // Подключаемся к PostgreSQL при запуске
-    await connectToPostgreSQL();
-    
+app.listen(config.port, () => {
     console.log(`Сервер запущен на порту ${config.port}`);
     console.log('Telegram бот активен!');
-    console.log('Система хранения:', pool ? 'PostgreSQL (постоянное)' : 'Память (временное)');
+    console.log('Система хранения: Память (временное)');
 });
 
 // Обработка завершения процесса

@@ -354,7 +354,14 @@ bot.on('message', async (msg) => {
 
         console.log('🔍 Структура ответа от OpenAI:', JSON.stringify(response, null, 2));
         
-        const botResponse = response.content || response.text || response.message || 'Извините, не удалось получить ответ.';
+        const botResponse = response.output_text || response.content || response.text || response.message || 'Извините, не удалось получить ответ.';
+
+        // Проверяем, что ответ не пустой
+        if (!botResponse || botResponse.trim() === '') {
+            console.error('❌ Пустой ответ от OpenAI');
+            await bot.sendMessage(userId, 'Извините, произошла ошибка. Попробуйте еще раз.');
+            return;
+        }
 
         // Добавляем ответ бота
         conversation.messages.push({ 

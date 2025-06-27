@@ -212,7 +212,7 @@ function convertToOpenAIMessages(conversationHistory) {
     const messages = [];
 
     // Добавляем всю историю диалога без системного промпта
-    // Системный промпт теперь хранится отдельно в OpenAI
+    // Системный промпт хранится в saved prompt
     conversationHistory.forEach(msg => {
         if (msg.role === 'user' || msg.role === 'assistant') {
             messages.push({
@@ -226,7 +226,7 @@ function convertToOpenAIMessages(conversationHistory) {
     console.log(`🔧 Сформировано ${messages.length} сообщений для GPT:`);
     console.log(`   - Сообщений пользователя: ${messages.filter(m => m.role === 'user').length}`);
     console.log(`   - Ответов ассистента: ${messages.filter(m => m.role === 'assistant').length}`);
-    console.log(`   - Использован сохраненный промпт ID: pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3`);
+    console.log(`   - Используется saved prompt: pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3`);
 
     return messages;
 }
@@ -343,16 +343,15 @@ bot.on('message', async (msg) => {
         console.log(`🔍 Проверка: история содержит ${conversation.messages.filter(m => m.role === 'user').length} сообщений пользователя`);
 
         // Отправляем запрос в OpenAI с сохраненным промптом
-        const response = await openai.chat.completions.create({
-            model: 'gpt-3.5-turbo',
-            messages: messages,
-            max_tokens: 500,
-            temperature: 0.7,
-            // Используем сохраненный промпт вместо системного сообщения
+        const response = await openai.responses.create({
             prompt: {
                 id: "pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3",
                 version: "1"
-            }
+            },
+            // Добавляем историю диалога как контекст
+            messages: messages,
+            max_tokens: 500,
+            temperature: 0.7
         });
 
         const botResponse = response.choices[0].message.content;

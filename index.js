@@ -348,10 +348,8 @@ bot.on('message', async (msg) => {
                 id: "pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3",
                 version: "1"
             },
-            // Используем input вместо messages для Responses API
-            input: messages,
-            max_tokens: 500,
-            temperature: 0.7
+            // Используем input для передачи истории диалога
+            input: messages
         });
 
         const botResponse = response.choices[0].message.content;

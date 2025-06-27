@@ -183,7 +183,7 @@ async function getAllDialogs() {
 }
 
 // Приветственное сообщение
-const welcomeMessage = "Добрый день! Я ИИ рекрутер Александра. Я знаю, кто из кандидатов не пройдет испытательный срок. Рассказать вам мой секрет?";
+const welcomeMessage = "Приветствую вас! Я Соня — ИИ-рекрутер. Как могу к вам обращаться?";
 
 // Функция для определения успешного диалога
 function isSuccessfulConversation(messages) {
@@ -207,26 +207,7 @@ function isSuccessfulConversation(messages) {
     );
 }
 
-// Функция для создания промпта с учетом истории и самообучения
-function createSystemPrompt() {
-    let learningPrompt = '';
-    
-    // Добавляем знания из успешных кейсов
-    if (database.successfulCases.length > 0) {
-        const recentSuccessfulCases = database.successfulCases.slice(-3);
-        learningPrompt = `
-УСПЕШНЫЕ СТРАТЕГИИ (учитесь на этих примерах):
-${recentSuccessfulCases.map(successCase => `
-- Ключевые фразы: ${successCase.keyPhrases.join(', ')}
-- Результат: ${successCase.outcome}
-- Время до успеха: ${successCase.timeToSuccess} сообщений
-`).join('\n')}
-`;
-    }
-
-    return `${companyKnowledge}
-
-
+// Функция для конвертации истории диалога в формат OpenAI
 function convertToOpenAIMessages(conversationHistory) {
     const messages = [];
 
@@ -355,7 +336,7 @@ bot.on('message', async (msg) => {
         // Конвертируем историю диалога в формат OpenAI
         const messages = convertToOpenAIMessages(conversation.messages);
 
-        console.log(`🧠 Отправляем в GPT ${messages.length} сообщений (включая системный промпт)`);
+        console.log(`🧠 Отправляем в GPT ${messages.length} сообщений`);
         console.log(`📝 Последние 3 сообщения в истории:`, 
             conversation.messages.slice(-3).map(m => `${m.role}: ${m.content.substring(0, 50)}...`)
         );

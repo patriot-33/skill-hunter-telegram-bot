@@ -64,7 +64,9 @@ const database = {
         successfulConversations: 0,
         date: new Date().toDateString()
     },
-    successfulCases: []
+    successfulCases: [],
+    // Защита от спама
+    userCooldowns: new Map()
 };
 
 // Функция для сохранения диалога пользователя
@@ -238,6 +240,16 @@ bot.on('message', async (msg) => {
     const userMessage = msg.text;
     const timestamp = new Date();
 
+    // Защита от спама - максимум 1 сообщение в 2 секунды
+    const lastMessageTime = database.userCooldowns.get(userId);
+    if (lastMessageTime && (timestamp - lastMessageTime) < 2000) {
+        console.log(`⏰ Пользователь ${userId} отправляет сообщения слишком часто`);
+        return;
+    }
+    database.userCooldowns.set(userId, timestamp);
+
+    console.log(`📨 Сообщение от ${userName} (${userId}): ${userMessage?.substring(0, 50)}...`);
+
     // ВАЖНО: Проверяем админские команды ПЕРВЫМИ, до любой другой обработки
     if (userMessage === '/clear_db' && userId.toString() === config.adminTelegramId) {
         try {
@@ -352,9 +364,12 @@ bot.on('message', async (msg) => {
             input: messages
         });
 
-        console.log('🔍 Структура ответа от OpenAI:', JSON.stringify(response, null, 2));
-        
         const botResponse = response.output_text || response.content || response.text || response.message || 'Извините, не удалось получить ответ.';
+
+        // Логируем только основную информацию, без полной структуры
+        console.log(`✅ Получен ответ от OpenAI (${botResponse.length} символов)`);
+        console.log(`💰 Использовано токенов: ${response.usage?.total_tokens || 'неизвестно'}`);
+        
 
         // Проверяем, что ответ не пустой
         if (!botResponse || botResponse.trim() === '') {

@@ -10,7 +10,9 @@ const config = {
     openaiApiKey: process.env.OPENAI_API_KEY,
     adminTelegramId: process.env.ADMIN_TELEGRAM_ID,
     databaseUrl: process.env.DATABASE_URL, // PostgreSQL URL от Render.com
-    port: process.env.PORT || 3000
+    port: process.env.PORT || 3000,
+    // ID вашей файнтюн модели
+    finetuneModel: "ft:gpt-3.5-turbo-0125:personal:sonya-chat:BnNSGyGz"
 };
 
 // Инициализация
@@ -185,7 +187,7 @@ async function getAllDialogs() {
 }
 
 // Приветственное сообщение
-const welcomeMessage = "Приветствую вас! Я Соня — ИИ-рекрутер. Как могу к вам обращаться?";
+const welcomeMessage = "Привет! Я Соня — AI-рекрутер из Skill Hunter. 😊 Чем могу помочь?";
 
 // Функция для определения успешного диалога
 function isSuccessfulConversation(messages) {
@@ -213,8 +215,7 @@ function isSuccessfulConversation(messages) {
 function convertToOpenAIMessages(conversationHistory) {
     const messages = [];
 
-    // Добавляем всю историю диалога без системного промпта
-    // Системный промпт хранится в saved prompt
+    // Добавляем всю историю диалога
     conversationHistory.forEach(msg => {
         if (msg.role === 'user' || msg.role === 'assistant') {
             messages.push({
@@ -225,10 +226,10 @@ function convertToOpenAIMessages(conversationHistory) {
     });
 
     // Логируем для отладки
-    console.log(`🔧 Сформировано ${messages.length} сообщений для GPT:`);
+    console.log(`🔧 Сформировано ${messages.length} сообщений для файнтюн модели:`);
     console.log(`   - Сообщений пользователя: ${messages.filter(m => m.role === 'user').length}`);
     console.log(`   - Ответов ассистента: ${messages.filter(m => m.role === 'assistant').length}`);
-    console.log(`   - Используется saved prompt: pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3 версия 6`);
+    console.log(`   - Используется файнтюн модель: ${config.finetuneModel}`);
 
     return messages;
 }
@@ -348,33 +349,35 @@ bot.on('message', async (msg) => {
         // Конвертируем историю диалога в формат OpenAI
         const messages = convertToOpenAIMessages(conversation.messages);
 
-        console.log(`🧠 Отправляем в GPT ${messages.length} сообщений`);
+        console.log(`🧠 Отправляем в файнтюн модель ${messages.length} сообщений`);
         console.log(`📝 Последние 3 сообщения в истории:`, 
             conversation.messages.slice(-3).map(m => `${m.role}: ${m.content.substring(0, 50)}...`)
         );
-        console.log(`🔍 Проверка: история содержит ${conversation.messages.filter(m => m.role === 'user').length} сообщений пользователя`);
 
-        // Отправляем запрос в OpenAI с сохраненным промптом
-        const response = await openai.responses.create({
-            prompt: {
-                id: "pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3",
-                version: "7"
-            },
-            // Используем input для передачи истории диалога
-            input: messages
+        // Отправляем запрос в OpenAI с файнтюн моделью
+        const response = await openai.chat.completions.create({
+            model: config.finetuneModel,
+            messages: [
+                {
+                    role: "system", 
+                    content: "Ты — Соня, AI-рекрутер из Skill Hunter. Ты дружелюбная, человечная, любишь шутить, но сохраняешь деловой стиль. Отвечай просто, коротко и по-человечески."
+                },
+                ...messages
+            ],
+            max_tokens: 500,
+            temperature: 0.7
         });
 
-        const botResponse = response.output_text || response.content || response.text || response.message || 'Извините, не удалось получить ответ.';
+        const botResponse = response.choices[0].message.content || 'Извините, не удалось получить ответ.';
 
-        // Логируем только основную информацию, без полной структуры
-        console.log(`✅ Получен ответ от OpenAI (${botResponse.length} символов)`);
+        // Логируем информацию об ответе
+        console.log(`✅ Получен ответ от файнтюн модели (${botResponse.length} символов)`);
         console.log(`💰 Использовано токенов: ${response.usage?.total_tokens || 'неизвестно'}`);
-        console.log(`📋 Фактически использована версия промпта: ${response.prompt?.version || 'неизвестно'}`);
+        console.log(`🧠 Модель: ${config.finetuneModel}`);
         
-
         // Проверяем, что ответ не пустой
         if (!botResponse || botResponse.trim() === '') {
-            console.error('❌ Пустой ответ от OpenAI');
+            console.error('❌ Пустой ответ от файнтюн модели');
             await bot.sendMessage(userId, 'Извините, произошла ошибка. Попробуйте еще раз.');
             return;
         }
@@ -417,7 +420,17 @@ bot.on('message', async (msg) => {
 
     } catch (error) {
         console.error('Ошибка при обработке сообщения:', error);
-        await bot.sendMessage(userId, 'Извините, произошла ошибка. Попробуйте еще раз.');
+        
+        // Проверяем тип ошибки для более детального логирования
+        if (error.code === 'model_not_found') {
+            console.error('❌ Файнтюн модель не найдена! Проверьте ID модели:', config.finetuneModel);
+            await bot.sendMessage(userId, 'Технические неполадки. Попробуйте позже.');
+        } else if (error.code === 'insufficient_quota') {
+            console.error('❌ Превышен лимит API OpenAI');
+            await bot.sendMessage(userId, 'Временные технические ограничения. Попробуйте через несколько минут.');
+        } else {
+            await bot.sendMessage(userId, 'Извините, произошла ошибка. Попробуйте еще раз.');
+        }
     }
 });
 
@@ -454,8 +467,10 @@ cron.schedule('0 18 * * *', async () => {
         const totalUsers = allDialogs.length;
         const successfulUsers = allDialogs.filter(d => d.conversation.isSuccessful).length;
 
-        const reportMessage = `📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ
+        const reportMessage = `📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ SKILL HUNTER BOT
 📅 Дата: ${today}
+🤖 Модель: Файнтюн Соня (${config.finetuneModel.split(':')[3]})
+
 💬 Проведено диалогов сегодня: ${stats.totalConversations}
 ✅ Заинтересовалось сегодня: ${stats.successfulConversations} человек
 📈 Конверсия за день: ${conversionRate}%
@@ -484,7 +499,14 @@ bot.on('error', (error) => {
 app.use(express.json());
 
 app.get('/', (req, res) => {
-    res.send('Telegram Sales Bot работает!');
+    res.send(`
+        <h1>🤖 Skill Hunter Telegram Bot</h1>
+        <p>✅ Бот активен и работает</p>
+        <p>🧠 Модель: ${config.finetuneModel}</p>
+        <p>💾 Хранилище: ${pool ? 'PostgreSQL' : 'Память'}</p>
+        <p><a href="/dialogs">📊 Посмотреть диалоги</a></p>
+        <p><a href="/stats">📈 Статистика API</a></p>
+    `);
 });
 
 app.get('/dialogs', async (req, res) => {
@@ -508,12 +530,15 @@ app.get('/dialogs', async (req, res) => {
                 .success { color: #4caf50; font-weight: bold; }
                 .stats { background: #fff; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
                 .storage-info { background: #fff3cd; padding: 10px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #ffc107; }
+                .model-info { background: #d1ecf1; padding: 10px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #17a2b8; }
                 .admin-panel { background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #dee2e6; }
-                .clear-btn { background: #dc3545; color: white; padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; }
-                .clear-btn:hover { background: #c82333; }
             </style>
         </head>
         <body>
+            <div class="model-info">
+                <strong>🧠 AI Модель:</strong> Файнтюн Соня (${config.finetuneModel})
+            </div>
+            
             <div class="storage-info">
                 <strong>💾 Хранилище:</strong> ${pool ? 'PostgreSQL (постоянное)' : 'Память (временное, сбрасывается при перезапуске)'}
             </div>
@@ -552,7 +577,7 @@ app.get('/dialogs', async (req, res) => {
                 
                 html += `
                 <div class="message ${messageClass}">
-                    <strong>${roleIcon} ${msg.role === 'user' ? conversation.userName : 'Skill Hunter Bot'}:</strong><br>
+                    <strong>${roleIcon} ${msg.role === 'user' ? conversation.userName : 'Соня (Файнтюн)'}:</strong><br>
                     ${msg.content.replace(/\n/g, '<br>')}
                     <div class="timestamp">${timestamp}</div>
                 </div>
@@ -584,7 +609,9 @@ app.get('/stats', async (req, res) => {
             totalMessages: totalMessages,
             overallConversion: totalUsers > 0 ? Math.round((successfulUsers / totalUsers) * 100) : 0,
             successfulCases: database.successfulCases.length,
-            storageType: pool ? 'PostgreSQL' : 'Memory'
+            storageType: pool ? 'PostgreSQL' : 'Memory',
+            aiModel: config.finetuneModel,
+            modelType: 'Fine-tuned Sonya'
         });
     } catch (error) {
         res.status(500).json({ error: 'Ошибка загрузки статистики', details: error.message });
@@ -596,13 +623,16 @@ app.listen(config.port, async () => {
     // Подключаемся к PostgreSQL при запуске
     const dbConnected = await connectToPostgreSQL();
     
-    console.log(`Сервер запущен на порту ${config.port}`);
-    console.log('Telegram бот активен!');
-    console.log('Система хранения:', pool ? 'PostgreSQL (постоянное)' : 'Память (временное)');
+    console.log(`🚀 Сервер запущен на порту ${config.port}`);
+    console.log('🤖 Telegram бот активен!');
+    console.log('🧠 AI Модель:', config.finetuneModel);
+    console.log('💾 Система хранения:', pool ? 'PostgreSQL (постоянное)' : 'Память (временное)');
     
     if (dbConnected) {
         console.log('🎉 База данных готова к работе!');
     }
+    
+    console.log('✅ Соня готова к общению с файнтюн обучением!');
 });
 
 // Обработка завершения процесса

@@ -358,7 +358,7 @@ bot.on('message', async (msg) => {
         const response = await openai.responses.create({
             prompt: {
                 id: "pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3",
-                version: "6"
+                version: "7"
             },
             // Используем input для передачи истории диалога
             input: messages

@@ -12,7 +12,7 @@ const config = {
     databaseUrl: process.env.DATABASE_URL, // PostgreSQL URL от Render.com
     port: process.env.PORT || 3000,
     // ID вашей файнтюн модели
-    finetuneModel: "ft:gpt-3.5-turbo-0125:personal:sonya-chat:BnNSGyGz"
+    finetuneModel: "ft:gpt-3.5-turbo-0125:personal:sonya-1046:BnVAQg8x"
 };
 
 // ИСПРАВЛЕНИЕ: Инициализация без автоматического polling

@@ -228,7 +228,7 @@ function convertToOpenAIMessages(conversationHistory) {
     console.log(`🔧 Сформировано ${messages.length} сообщений для GPT:`);
     console.log(`   - Сообщений пользователя: ${messages.filter(m => m.role === 'user').length}`);
     console.log(`   - Ответов ассистента: ${messages.filter(m => m.role === 'assistant').length}`);
-    console.log(`   - Используется saved prompt: pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3`);
+    console.log(`   - Используется saved prompt: pmpt_685eb306a0f08197b30796e844844ead02962b8883330fc3 версия 6`);
 
     return messages;
 }
@@ -369,6 +369,7 @@ bot.on('message', async (msg) => {
         // Логируем только основную информацию, без полной структуры
         console.log(`✅ Получен ответ от OpenAI (${botResponse.length} символов)`);
         console.log(`💰 Использовано токенов: ${response.usage?.total_tokens || 'неизвестно'}`);
+        console.log(`📋 Фактически использована версия промпта: ${response.prompt?.version || 'неизвестно'}`);
         
 
         // Проверяем, что ответ не пустой

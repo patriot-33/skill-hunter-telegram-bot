@@ -15,7 +15,7 @@ const config = {
     finetuneModel: "ft:gpt-3.5-turbo-0125:personal:sonya-1046:BnVAQg8x"
 };
 
-// ИСПРАВЛЕНИЕ: Инициализация без автоматического polling
+//  ИСПРАВЛЕНИЕ: Инициализация без автоматического polling
 const bot = new TelegramBot(config.telegramToken, { polling: false });
 const openai = new OpenAI({ apiKey: config.openaiApiKey });
 const app = express();
